@@ -1,0 +1,100 @@
+mod cli;
+mod parsers;
+mod render;
+mod report;
+mod revise;
+mod run;
+mod tool;
+
+use std::path::PathBuf;
+
+use clap::Parser;
+
+use cli::{AnalyzeOptions, Command};
+
+#[tokio::main]
+async fn main() {
+    let cli = cli::Cli::parse();
+
+    match cli.command {
+        Some(Command::Analyze(args)) => {
+            run_analyze(args.analyze_options(), args.json, args.out, args.fail_under).await
+        }
+        Some(Command::Revise(args)) => run_revise(args).await,
+        None => {
+            let json = cli.json;
+            let out = cli.out.clone();
+            let fail_under = cli.fail_under;
+            run_analyze(cli.analyze_options(), json, out, fail_under).await
+        }
+    }
+}
+
+async fn run_analyze(
+    opts: AnalyzeOptions,
+    json: bool,
+    out: Option<PathBuf>,
+    fail_under: Option<f64>,
+) {
+    let report = match run::execute(&opts).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("uni: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let json_text = serde_json::to_string_pretty(&report).expect("report is always serializable");
+
+    if let Some(path) = &out {
+        if let Err(e) = std::fs::write(path, &json_text) {
+            eprintln!("uni: failed to write {}: {e}", path.display());
+            std::process::exit(2);
+        }
+    }
+
+    if json {
+        println!("{json_text}");
+    } else {
+        print!("{}", render::human(&report));
+    }
+
+    if let Some(threshold) = fail_under {
+        match report.overall.score {
+            Some(score) if score < threshold => std::process::exit(1),
+            None => {
+                eprintln!("uni: --fail-under given but no tool produced a numeric score");
+                std::process::exit(1);
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn run_revise(args: cli::ReviseArgs) {
+    let json = args.json;
+
+    let report = match revise::execute(&args).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("uni: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    if json {
+        let json_text =
+            serde_json::to_string_pretty(&report).expect("revise report is always serializable");
+        println!("{json_text}");
+    } else {
+        print!("{}", revise::human(&report));
+    }
+
+    let any_failed = report
+        .remediations
+        .iter()
+        .any(|r| r.outcome == revise::Outcome::Failed);
+    if args.apply && any_failed {
+        std::process::exit(1);
+    }
+}
