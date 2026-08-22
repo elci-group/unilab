@@ -1,6 +1,6 @@
-//! `ferret track` is Ferret's project-wide hunt: it prints a stable human
-//! summary followed by CodeRabbit-style findings. Ferret currently has no JSON
-//! output for this operation, so this parser consumes the labelled summary and
+//! `ferret hunt` (called `track` by some builds) prints a stable human summary
+//! followed by CodeRabbit-style findings. Ferret currently has no JSON output
+//! for this operation, so this parser consumes the labelled summary and
 //! finding lines while retaining no ANSI-decorated raw output.
 use super::{clamp_score, ParseOutcome};
 use crate::report::Status;

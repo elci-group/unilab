@@ -258,13 +258,7 @@ fn build_command(tool: ToolId, bin: &Path, target: &Path) -> tokio::process::Com
         ToolId::Chakra => {
             cmd.arg(target).arg("--json");
         }
-        ToolId::Ferret => {
-            // `track` is Ferret's project-wide hunt. Keep its learning corpus
-            // in memory so a uni snapshot never writes ferret.db into either
-            // the caller's working directory or the analyzed project.
-            cmd.args(["--database", ":memory:", "track"]).arg(target);
-            cmd.env("NO_COLOR", "1");
-        }
+        ToolId::Ferret => unreachable!("ferret is capability-probed by run_one"),
         ToolId::Fract => {
             cmd.current_dir(target);
             cmd.args(["index", "--format", "json"]);
@@ -301,7 +295,24 @@ async fn run_one(
             .await;
     }
 
-    let mut cmd = build_command(tool, &bin, &target);
+    let mut cmd = if tool == ToolId::Ferret {
+        let Some(subcommand) = ferret_hunt_subcommand(&bin).await else {
+            return unavailable_report(
+                tool,
+                "installed ferret supports neither `hunt` nor the newer project-review alias `track`; update ferret and rerun uni"
+                    .to_string(),
+            );
+        };
+        let mut cmd = tokio::process::Command::new(&bin);
+        // Keep Ferret's learning corpus in memory so a uni snapshot never
+        // writes ferret.db into the caller or the analyzed project.
+        cmd.args(["--database", ":memory:", subcommand])
+            .arg(&target);
+        cmd.env("NO_COLOR", "1");
+        cmd
+    } else {
+        build_command(tool, &bin, &target)
+    };
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
@@ -362,6 +373,27 @@ async fn run_one(
         note: parsed.note,
         raw: parsed.raw,
     }
+}
+
+/// Ferret has shipped the project-wide review under both names: prefer the
+/// requested `hunt` spelling and retain compatibility with builds that expose
+/// it as `track`. A help probe is side-effect free and avoids guessing from a
+/// version string.
+async fn ferret_hunt_subcommand(bin: &Path) -> Option<&'static str> {
+    for subcommand in ["hunt", "track"] {
+        let mut cmd = tokio::process::Command::new(bin);
+        cmd.args([subcommand, "--help"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .stdin(Stdio::null());
+        if matches!(
+            tokio::time::timeout(Duration::from_secs(5), cmd.status()).await,
+            Ok(Ok(status)) if status.success()
+        ) {
+            return Some(subcommand);
+        }
+    }
+    None
 }
 
 async fn run_jeenome(

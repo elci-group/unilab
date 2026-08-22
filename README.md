@@ -5,8 +5,9 @@ normalizes each application's output into a single graded report.
 
 The default suite is Amber, Ami, Bart, Chakra, Ferret hunt, Fract, Isopod,
 Lwoodz, Tempcheq, Traci, and Vamos. Jeenome is opt-in because it requires an
-`strace` trace. Ferret hunt uses Ferret's `track` operation with an in-memory
-corpus, so the analysis does not write `ferret.db` into the target.
+`strace` trace. Ferret hunt prefers Ferret's `hunt` operation and supports
+builds that call it `track`; it uses an in-memory corpus, so the analysis does
+not write `ferret.db` into the target.
 
 ## Usage
 
