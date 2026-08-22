@@ -28,6 +28,12 @@ directory and runs `baby --user` from that checkout. If Git, Baby, cloning, or
 installation fails, Uni records the application as unavailable and continues
 building the rest of the report.
 
+In an interactive terminal, clone and install stages show a spinner. In CI or
+redirected output, Uni prints stable start lines instead. Each stage also emits
+transparent telemetry to stderr containing only the application name, stage,
+outcome, exit code, and elapsed milliseconds. This telemetry is local output:
+Uni does not persist or transmit it, and JSON report data on stdout stays clean.
+
 ## Ferret scoring
 
 Ferret findings reduce its 100-point score by severity: 25 points for a

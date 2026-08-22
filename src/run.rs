@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -167,15 +168,19 @@ async fn ensure_binary(tool: ToolId, tools_dir: &Path) -> Option<PathBuf> {
             }
         };
         let url = tool.repo_url();
-        eprintln!("uni: cloning missing tool {} from {url}", tool.key());
-        let output = tokio::process::Command::new(git)
-            .args(["clone", "--depth", "1", url])
+        let mut cmd = tokio::process::Command::new(git);
+        cmd.args(["clone", "--depth", "1", url])
             .arg(&repo)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .stdin(Stdio::null())
-            .output()
-            .await;
+            .stdin(Stdio::null());
+        let output = run_bootstrap_stage(
+            cmd,
+            tool,
+            "clone",
+            format!("cloning {} from {url}", tool.key()),
+        )
+        .await;
         match output {
             Ok(out) if out.status.success() => {}
             Ok(out) => {
@@ -207,18 +212,19 @@ async fn ensure_binary(tool: ToolId, tools_dir: &Path) -> Option<PathBuf> {
             return None;
         }
     };
-    eprintln!(
-        "uni: installing missing tool {} with `baby --user`",
-        tool.key()
-    );
-    let output = tokio::process::Command::new(baby)
-        .arg("--user")
+    let mut cmd = tokio::process::Command::new(baby);
+    cmd.arg("--user")
         .current_dir(&repo)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .output()
-        .await;
+        .stdin(Stdio::null());
+    let output = run_bootstrap_stage(
+        cmd,
+        tool,
+        "install",
+        format!("installing {} with Baby", tool.key()),
+    )
+    .await;
     match output {
         Ok(out) if out.status.success() => tool::resolve_binary(tool, tools_dir),
         Ok(out) => {
@@ -237,6 +243,78 @@ async fn ensure_binary(tool: ToolId, tools_dir: &Path) -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// Run one visible bootstrap stage. Interactive terminals get a compact
+/// spinner; redirected/CI output gets one stable start line. Every path emits
+/// local-only telemetry to stderr, including spawn failures.
+async fn run_bootstrap_stage(
+    mut cmd: tokio::process::Command,
+    tool: ToolId,
+    stage: &'static str,
+    label: String,
+) -> io::Result<Output> {
+    const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+
+    let animated = io::stderr().is_terminal();
+    if !animated {
+        eprintln!("uni: {label}...");
+    }
+
+    let started = Instant::now();
+    let result = if animated {
+        let future = cmd.output();
+        tokio::pin!(future);
+        let mut ticker = tokio::time::interval(Duration::from_millis(80));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut frame = 0usize;
+
+        loop {
+            tokio::select! {
+                result = &mut future => break result,
+                _ = ticker.tick() => {
+                    eprint!("\r\x1b[2K{} {label}", FRAMES[frame % FRAMES.len()]);
+                    let _ = io::stderr().flush();
+                    frame += 1;
+                }
+            }
+        }
+    } else {
+        cmd.output().await
+    };
+    let duration_ms = started.elapsed().as_millis();
+
+    if animated {
+        eprint!("\r\x1b[2K");
+        let _ = io::stderr().flush();
+    }
+
+    let (outcome, exit_code) = match &result {
+        Ok(output) if output.status.success() => ("success", output.status.code()),
+        Ok(output) => ("failed", output.status.code()),
+        Err(_) => ("spawn_error", None),
+    };
+    eprintln!(
+        "{}",
+        bootstrap_telemetry_line(tool, stage, outcome, exit_code, duration_ms)
+    );
+    result
+}
+
+fn bootstrap_telemetry_line(
+    tool: ToolId,
+    stage: &str,
+    outcome: &str,
+    exit_code: Option<i32>,
+    duration_ms: u128,
+) -> String {
+    let exit_code = exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "uni telemetry (local only): tool={} stage={stage} outcome={outcome} exit_code={exit_code} duration_ms={duration_ms}",
+        tool.key()
+    )
 }
 
 fn build_command(tool: ToolId, bin: &Path, target: &Path) -> tokio::process::Command {
@@ -667,5 +745,26 @@ fn error_report(
         findings: Vec::new(),
         note: Some(note),
         raw: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_telemetry_is_explicit_and_local_only() {
+        let line = bootstrap_telemetry_line(ToolId::Ferret, "install", "success", Some(0), 42);
+        assert_eq!(
+            line,
+            "uni telemetry (local only): tool=ferret stage=install outcome=success exit_code=0 duration_ms=42"
+        );
+    }
+
+    #[test]
+    fn bootstrap_telemetry_handles_spawn_errors_without_fake_exit_codes() {
+        let line = bootstrap_telemetry_line(ToolId::Tempcheq, "clone", "spawn_error", None, 7);
+        assert!(line.contains("outcome=spawn_error"));
+        assert!(line.contains("exit_code=none"));
     }
 }
